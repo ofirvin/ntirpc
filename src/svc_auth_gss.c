@@ -706,6 +706,13 @@ _svcauth_gss(struct svc_req *req, bool *no_dispatch)
 
 	enum auth_stat rc = AUTH_OK;
 
+	/* Reject all RPCSEC_GSS requests immediately if auth-gss is disabled */
+	if (!svcauth_gss_enabled) {
+		__warnx(TIRPC_DEBUG_FLAG_AUTH,
+			"%s: auth-gss disabled. Failing", __func__);
+		return AUTH_REJECTEDCRED;
+	}
+
 	/* Unserialize client credentials. */
 	if (req->rq_msg.cb_cred.oa_length <= 0) {
 		return AUTH_BADCRED;

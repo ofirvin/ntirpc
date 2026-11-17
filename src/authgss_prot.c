@@ -49,7 +49,7 @@
 
 /* additional space needed for encoding */
 #define RPC_SLACK_SPACE 1024
-#define AUTHGSS_MAX_TOKEN_SIZE 24576 /* default MS PAC is 12000 bytes */
+#define AUTHGSS_MAX_TOKEN_SIZE 131072 /* accommodate max AD MS-PAC + AP-REQ */
 #define MAXALLOCA (256)
 
 bool
@@ -72,14 +72,14 @@ xdr_rpc_gss_encode(XDR *xdrs, gss_buffer_t buf, u_int maxsize)
 	return xdr_stat;
 }
 
-bool
-xdr_rpc_gss_decode(XDR *xdrs, gss_buffer_t buf)
+static bool
+xdr_rpc_gss_decode_max(XDR *xdrs, gss_buffer_t buf, u_int maxsize)
 {
 	u_int tmplen = 0;
 	bool xdr_stat;
 
 	xdr_stat = xdr_bytes_decode(xdrs, (char **)&buf->value, &tmplen,
-					   UINT_MAX);
+					   maxsize);
 
 	if (xdr_stat)
 		buf->length = tmplen;
@@ -92,6 +92,12 @@ xdr_rpc_gss_decode(XDR *xdrs, gss_buffer_t buf)
 	return xdr_stat;
 }
 
+bool
+xdr_rpc_gss_decode(XDR *xdrs, gss_buffer_t buf)
+{
+	return (xdr_rpc_gss_decode_max(xdrs, buf, AUTHGSS_MAX_TOKEN_SIZE));
+}
+
 static bool
 xdr_rpc_gss_buf(XDR *xdrs, gss_buffer_t buf, u_int maxsize)
 {
@@ -99,7 +105,7 @@ xdr_rpc_gss_buf(XDR *xdrs, gss_buffer_t buf, u_int maxsize)
 	case XDR_ENCODE:
 		return (xdr_rpc_gss_encode(xdrs, buf, maxsize));
 	case XDR_DECODE:
-		return (xdr_rpc_gss_decode(xdrs, buf));
+		return (xdr_rpc_gss_decode_max(xdrs, buf, maxsize));
 	case XDR_FREE:
 		mem_free(buf->value, buf->length);
 		return (TRUE);
@@ -151,14 +157,12 @@ xdr_rpc_gss_init_res(XDR *xdrs, struct rpc_gss_init_res *p)
 {
 	bool xdr_stat;
 
-	u_int ctx_maxlen = (u_int) (p->gr_ctx.length + RPC_SLACK_SPACE);
-	u_int tok_maxlen = (u_int) (p->gr_token.length + RPC_SLACK_SPACE);
-
-	xdr_stat = (xdr_rpc_gss_buf(xdrs, &p->gr_ctx, ctx_maxlen)
+	xdr_stat = (xdr_rpc_gss_buf(xdrs, &p->gr_ctx, MAX_AUTH_BYTES)
 		    && inline_xdr_u_int32_t(xdrs, &p->gr_major)
 		    && inline_xdr_u_int32_t(xdrs, &p->gr_minor)
 		    && inline_xdr_u_int32_t(xdrs, &p->gr_win)
-		    && xdr_rpc_gss_buf(xdrs, &p->gr_token, tok_maxlen));
+		    && xdr_rpc_gss_buf(xdrs, &p->gr_token,
+				       AUTHGSS_MAX_TOKEN_SIZE));
 
 	__warnx(TIRPC_DEBUG_FLAG_RPCSEC_GSS,
 		"%s() %s %s (ctx %p:%d, maj %" PRIu32 ", min %" PRIu32 ", win %" PRIu32 ", token %p:%d)",
