@@ -1028,20 +1028,20 @@ xdr_rpc_gss_unwrap(XDR *xdrs, xdrproc_t xdr_func, void *xdr_ptr,
 	}
 
 	/* Decode rpc_gss_data_t (sequence number + arguments). */
-	xdr_stat = (XDR_GETUINT32(usexdrs, &seq_num)
-		    && (*xdr_func) (usexdrs, xdr_ptr));
+	if (!XDR_GETUINT32(usexdrs, &seq_num)) {
+		xdr_stat = FALSE;
+	} else if (seq_num != seq) {
+		__warnx(TIRPC_DEBUG_FLAG_RPCSEC_GSS,
+			"%s() wrong sequence number in databody",
+			__func__);
+		xdr_stat = FALSE;
+	} else {
+		xdr_stat = (*xdr_func) (usexdrs, xdr_ptr);
+	}
 
 	if (usexdrs == &tmpxdrs) {
 		/* If it's the tmpxdrs, then destroy the xdrmem we created. */
 		XDR_DESTROY(&tmpxdrs);
-	}
-
-	/* Verify sequence number. */
-	if (xdr_stat == TRUE && seq_num != seq) {
-		__warnx(TIRPC_DEBUG_FLAG_RPCSEC_GSS,
-			"%s() wrong sequence number in databody",
-			__func__);
-		return (FALSE);
 	}
 
 out:
