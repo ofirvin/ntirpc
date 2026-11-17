@@ -38,6 +38,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/random.h>
 #include <rpc/rpc.h>
 #include <rpc/svc_auth.h>
 #include <rpc/gss_internal.h>
@@ -405,11 +406,14 @@ svcauth_gss_accept_sec_context(struct svc_req *req,
 		gss_release_buffer(&min_stat, &gr->gr_token);
 		return (false);
 	}
-	/* ANDROS: krb5 mechglue returns ctx of size 8 - two pointers,
-	 * one to the mechanism oid, one to the internal_ctx_id */
-	gr->gr_ctx.value = mem_alloc(sizeof(gss_union_ctx_id_desc));
-	memcpy(gr->gr_ctx.value, gd->ctx, sizeof(gss_union_ctx_id_desc));
-	gr->gr_ctx.length = sizeof(gss_union_ctx_id_desc);
+
+	if (getentropy(gd->ctx_handle, sizeof(gd->ctx_handle)) != 0) {
+		__warnx(TIRPC_DEBUG_FLAG_AUTH,
+			"%s: failed to generate random context handle",
+			__func__);
+		gss_release_buffer(&min_stat, &gr->gr_token);
+		return (false);
+	}
 
 	/* ANDROS: change for debugging linux kernel version...
 	   gr->gr_win = 0x00000005;
@@ -433,9 +437,6 @@ svcauth_gss_accept_sec_context(struct svc_req *req,
 			__warnx(TIRPC_DEBUG_FLAG_AUTH,
 				"%s: display_name major=%u minor=%u", __func__,
 				maj_stat, min_stat);
-			mem_free(gr->gr_ctx.value, 0);
-			gr->gr_ctx.value = NULL;
-			gr->gr_ctx.length = 0;
 			gss_release_buffer(&min_stat, &gr->gr_token);
 			return (false);
 		}
@@ -470,18 +471,12 @@ svcauth_gss_accept_sec_context(struct svc_req *req,
 				&checksum);
 
 		if (maj_stat != GSS_S_COMPLETE) {
-			mem_free(gr->gr_ctx.value, 0);
-			gr->gr_ctx.value = NULL;
-			gr->gr_ctx.length = 0;
 			gss_release_buffer(&min_stat, &gr->gr_token);
 			return (false);
 		}
 
 		/* XXX ref? (assert gd->locked?) */
 		if (checksum.length > MAX_AUTH_BYTES){
-			mem_free(gr->gr_ctx.value, 0);
-			gr->gr_ctx.value = NULL;
-			gr->gr_ctx.length = 0;
 			gss_release_buffer(&min_stat, &gr->gr_token);
 			gss_release_buffer(&min_stat, &checksum);
 			return (false);
@@ -492,6 +487,10 @@ svcauth_gss_accept_sec_context(struct svc_req *req,
 		       checksum.length);
 		gss_release_buffer(&min_stat, &checksum);
 	}
+
+	gr->gr_ctx.value = mem_alloc(sizeof(gd->ctx_handle));
+	memcpy(gr->gr_ctx.value, gd->ctx_handle, sizeof(gd->ctx_handle));
+	gr->gr_ctx.length = sizeof(gd->ctx_handle);
 	return (true);
 }
 

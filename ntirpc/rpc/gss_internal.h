@@ -87,6 +87,7 @@ typedef gss_union_ctx_id_desc *gss_union_ctx_id_t;
  * such a situation, we maintain a larger sequence window on the server
  */
 #define SVC_GSS_SEQ_WIN_INTERNAL (SVC_GSS_SEQ_WIN * 2)
+#define SVC_GSS_CTX_HANDLE_SIZE 16
 
 struct svc_rpc_gss_data {
 	struct opr_rbtree_node node_k;
@@ -98,6 +99,7 @@ struct svc_rpc_gss_data {
 	struct {
 		uint32_t k;
 	} hk;
+	uint8_t ctx_handle[SVC_GSS_CTX_HANDLE_SIZE];
 	bool established;
 	gss_ctx_id_t ctx;	/* context id */
 	struct rpc_gss_sec sec;	/* security triple */

@@ -69,51 +69,32 @@ static struct authgss_hash_st authgss_hash_st = {
 	false			/* initialized */
 };
 
-static inline uint64_t
-gss_ctx_hash(gss_union_ctx_id_desc *gss_ctx)
+static inline uint32_t
+gss_ctx_hash(const uint8_t ctx_handle[SVC_GSS_CTX_HANDLE_SIZE])
 {
-	/* Mash together two pointers, can overflow top bit.
-	 * Our only concern here is that it be unique
-	 * (or have a very rare collision rate).
-	 */
-	return ((uint64_t)(uintptr_t)gss_ctx->mech_type +
-		(uint64_t)(uintptr_t)gss_ctx->internal_ctx_id);
+	uint32_t hash = 0;
+	size_t index;
+
+	for (index = 0; index < SVC_GSS_CTX_HANDLE_SIZE; index++)
+		hash = (hash * 31) + ctx_handle[index];
+
+	return (hash);
 }
 
 static int
 svc_rpc_gss_cmpf(const struct opr_rbtree_node *lhs,
 		 const struct opr_rbtree_node *rhs)
 {
-	struct svc_rpc_gss_data *lk, *rk;
-	gss_union_ctx_id_desc *gss_ctx_lk, *gss_ctx_rk;
-	uint64_t mech_type_lk, internal_ctx_id_lk;
-	uint64_t mech_type_rk, internal_ctx_id_rk;
-
+	const struct svc_rpc_gss_data *lk, *rk;
+	int cmp;
 
 	lk = opr_containerof(lhs, struct svc_rpc_gss_data, node_k);
 	rk = opr_containerof(rhs, struct svc_rpc_gss_data, node_k);
-	gss_ctx_lk = (gss_union_ctx_id_desc *) (lk->ctx);
-	gss_ctx_rk = (gss_union_ctx_id_desc *) (rk->ctx);
-	mech_type_lk = (uint64_t)(uintptr_t)gss_ctx_lk->mech_type;
-	mech_type_rk = (uint64_t)(uintptr_t)gss_ctx_rk->mech_type;
-	internal_ctx_id_lk = (uint64_t)(uintptr_t)gss_ctx_lk->internal_ctx_id;
-	internal_ctx_id_rk = (uint64_t)(uintptr_t)gss_ctx_rk->internal_ctx_id;
-
-	/* Move left OR right based on mech type */
-	if (mech_type_lk < mech_type_rk)
+	cmp = memcmp(lk->ctx_handle, rk->ctx_handle, SVC_GSS_CTX_HANDLE_SIZE);
+	if (cmp < 0)
 		return -1;
-
-	if (mech_type_lk > mech_type_rk)
+	if (cmp > 0)
 		return 1;
-
-	/* If mech_type are equal, move based on internal_ctx_id */
-	if (internal_ctx_id_lk < internal_ctx_id_rk)
-		return -1;
-
-	if (internal_ctx_id_lk > internal_ctx_id_rk)
-		return 1;
-
-	/* If we have reached here, both mech_type and id are equal */
 	return 0;
 }
 
@@ -166,7 +147,6 @@ struct svc_rpc_gss_data *
 authgss_ctx_hash_get(struct rpc_gss_cred *gc)
 {
 	struct svc_rpc_gss_data gk, *gd = NULL;
-	gss_union_ctx_id_desc *gss_ctx;
 	struct opr_rbtree_node *ngd;
 	struct authgss_x_part *axp;
 	struct rbtree_x_part *t;
@@ -182,10 +162,13 @@ authgss_ctx_hash_get(struct rpc_gss_cred *gc)
         }
 
 	authgss_hash_init();
-
-	gss_ctx = (gss_union_ctx_id_desc *) (gc->gc_ctx.value);
-	gk.hk.k = gss_ctx_hash(gss_ctx);
-	gk.ctx = (gc->gc_ctx.value);
+	if (gc->gc_ctx.length != SVC_GSS_CTX_HANDLE_SIZE) {
+		__warnx(TIRPC_DEBUG_FLAG_RPCSEC_GSS,
+			"%s: invalid gss context size", __func__);
+		return NULL;
+	}
+	memcpy(gk.ctx_handle, gc->gc_ctx.value, SVC_GSS_CTX_HANDLE_SIZE);
+	gk.hk.k = gss_ctx_hash(gk.ctx_handle);
 
 	t = rbtx_partition_of_scalar(&authgss_hash_st.xt, gk.hk.k);
 
@@ -221,7 +204,6 @@ authgss_ctx_hash_set(struct svc_rpc_gss_data *gd)
 {
 	struct rbtree_x_part *t;
 	struct authgss_x_part *axp;
-	gss_union_ctx_id_desc *gss_ctx;
 	bool rslt;
 
         /**
@@ -236,8 +218,7 @@ authgss_ctx_hash_set(struct svc_rpc_gss_data *gd)
 
 	authgss_hash_init();
 
-	gss_ctx = (gss_union_ctx_id_desc *) (gd->ctx);
-	gd->hk.k = gss_ctx_hash(gss_ctx);
+	gd->hk.k = gss_ctx_hash(gd->ctx_handle);
 
 	(void)atomic_inc_uint32_t(&gd->refcnt);
 	t = rbtx_partition_of_scalar(&authgss_hash_st.xt, gd->hk.k);
