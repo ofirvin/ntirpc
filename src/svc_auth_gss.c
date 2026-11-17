@@ -789,17 +789,12 @@ _svcauth_gss(struct svc_req *req, bool *no_dispatch)
 	/* thread auth */
 	req->rq_auth = gd->auth;
 
-	/* Check sequence number. */
+	/* Check expiration and populate request fields. */
 	if (gd->established) {
 		if (get_time_fast() >= gd->endtime) {
 			*no_dispatch = true;
 			 rc = RPCSEC_GSS_CREDPROBLEM;
 			 goto gd_free;
-		}
-
-		*no_dispatch = !svcauth_gss_is_seq_num_valid(gd, gc->gc_seq);
-		if (*no_dispatch) {
-			goto gd_free;
 		}
 
 		req->rq_ap1 = (void *)(uintptr_t) gc->gc_seq; /* GCC casts */
@@ -855,33 +850,12 @@ _svcauth_gss(struct svc_req *req, bool *no_dispatch)
 			goto gd_free;
 		}
 
-		if (gr.gr_major == GSS_S_COMPLETE) {
-			(void)authgss_ctx_hash_set(gd);
-		}
-
-		*no_dispatch = true;
-
-		req->rq_msg.RPCM_ack.ar_results.where = &gr;
-		req->rq_msg.RPCM_ack.ar_results.proc =
-					(xdrproc_t) xdr_rpc_gss_init_res;
-		res = send_reply_to_client(req);
-
-		/* XXX */
-		gss_release_buffer(&min_stat, &gr.gr_token);
 		gss_release_buffer(&min_stat, &gd->checksum);
-		mem_free(gr.gr_ctx.value, 0);
-
-		if (!res) {
-			rc = AUTH_FAILED;
-			mutex_unlock(&gd->lock);
-			(void)authgss_ctx_hash_del(gd);
-			goto gd_free_nolock;
-		}
 
 		if (gr.gr_major == GSS_S_COMPLETE) {
-			gd->established = true;
 			/* krb5 pac -- try all that apply */
 			gss_buffer_desc attr, display_buffer;
+			OM_uint32 pac_major, pac_minor;
 
 			/* completely generic */
 			int auth = 1, comp = 0, more = -1;
@@ -895,22 +869,55 @@ _svcauth_gss(struct svc_req *req, bool *no_dispatch)
 			attr.value = "urn:mspac:";
 			attr.length = 10;
 
-			gr.gr_major =
-				gss_get_name_attribute(&gr.gr_minor,
+			pac_major =
+				gss_get_name_attribute(&pac_minor,
 						       gd->client_name,
 						       &attr, &auth, &comp,
 						       &gd->pac.ms_pac,
 						       &display_buffer,
 						       &more);
 
-			if (gr.gr_major == GSS_S_COMPLETE) {
+			if (pac_major == GSS_S_COMPLETE) {
 				/* dont need it */
-				gss_release_buffer(&gr.gr_minor,
+				gss_release_buffer(&pac_minor,
 						   &display_buffer);
 				gd->flags |= SVC_RPC_GSS_FLAG_MSPAC;
 			}
+			gd->established = true;
 		}
-		break;
+
+		*no_dispatch = true;
+
+		/* Unlock gd->lock before hash operations and sending reply to
+		 * preserve t->mtx -> gd->lock and xprt->xp_lock ordering and
+		 * avoid self-deadlock in authgss_ctx_hash_del().
+		 */
+		mutex_unlock(&gd->lock);
+
+		if (gr.gr_major == GSS_S_COMPLETE) {
+			if (!authgss_ctx_hash_set(gd)) {
+				gss_release_buffer(&min_stat, &gr.gr_token);
+				mem_free(gr.gr_ctx.value, 0);
+				rc = AUTH_FAILED;
+				goto gd_free_nolock;
+			}
+		}
+
+		req->rq_msg.RPCM_ack.ar_results.where = &gr;
+		req->rq_msg.RPCM_ack.ar_results.proc =
+					(xdrproc_t) xdr_rpc_gss_init_res;
+		res = send_reply_to_client(req);
+
+		/* XXX */
+		gss_release_buffer(&min_stat, &gr.gr_token);
+		mem_free(gr.gr_ctx.value, 0);
+
+		if (!res) {
+			rc = AUTH_FAILED;
+			if (gr.gr_major == GSS_S_COMPLETE)
+				(void)authgss_ctx_hash_del(gd);
+		}
+		goto gd_free_nolock;
 
 		/* XXX next 2 cases:  is it correct to leave gd in cache
 		 * after a validate or verf failure ? */
@@ -923,6 +930,11 @@ _svcauth_gss(struct svc_req *req, bool *no_dispatch)
 			goto gd_free;
 		case 0:
 			break;
+		}
+
+		*no_dispatch = !svcauth_gss_is_seq_num_valid(gd, gc->gc_seq);
+		if (*no_dispatch) {
+			goto gd_free;
 		}
 
 		if (!svcauth_gss_nextverf(req, gd, htonl(gc->gc_seq))) {
@@ -939,6 +951,11 @@ _svcauth_gss(struct svc_req *req, bool *no_dispatch)
 
 		if (svcauth_gss_validate(req, gd)) {
 			rc = RPCSEC_GSS_CREDPROBLEM;
+			goto gd_free;
+		}
+
+		*no_dispatch = !svcauth_gss_is_seq_num_valid(gd, gc->gc_seq);
+		if (*no_dispatch) {
 			goto gd_free;
 		}
 
@@ -1049,6 +1066,16 @@ svcauth_gss_destroy(SVCAUTH *auth)
 	return (true);
 }
 
+static inline bool
+svcauth_gss_should_bypass_wrap(const struct svc_rpc_gss_data *gd,
+			       const struct rpc_gss_cred *gc)
+{
+	return (!gd->established ||
+		gc->gc_svc == RPCSEC_GSS_SVC_NONE ||
+		gc->gc_proc == RPCSEC_GSS_INIT ||
+		gc->gc_proc == RPCSEC_GSS_CONTINUE_INIT);
+}
+
 static bool
 svcauth_gss_wrap(struct svc_req *req, XDR *xdrs)
 {
@@ -1071,7 +1098,7 @@ svcauth_gss_wrap(struct svc_req *req, XDR *xdrs)
 		: gc->gc_svc == RPCSEC_GSS_SVC_PRIVACY ? "krb5p"
 		: "unknown");
 
-	if (!gd->established || gc->gc_svc == RPCSEC_GSS_SVC_NONE) {
+	if (svcauth_gss_should_bypass_wrap(gd, gc)) {
 		result = (svc_auth_none.svc_ah_ops->svc_ah_wrap(req, xdrs));
 		goto out;
 	}
@@ -1102,7 +1129,7 @@ svcauth_gss_unwrap(struct svc_req *req)
 	metrics_libntirpc_clock_gettime(&start_time);
 #endif /* USE_MONITORING */
 
-	if (!gd->established || gc->gc_svc == RPCSEC_GSS_SVC_NONE) {
+	if (svcauth_gss_should_bypass_wrap(gd, gc)) {
 		result = (svc_auth_none.svc_ah_ops->svc_ah_unwrap(req));
 		goto out;
 	}
@@ -1141,7 +1168,7 @@ svcauth_gss_checksum(struct svc_req *req)
 	metrics_libntirpc_clock_gettime(&start_time);
 #endif /* USE_MONITORING */
 
-	if (!gd->established || gc->gc_svc == RPCSEC_GSS_SVC_NONE) {
+	if (svcauth_gss_should_bypass_wrap(gd, gc)) {
 		result = (svc_auth_none.svc_ah_ops->svc_ah_checksum(req));
 		goto out;
 	}
